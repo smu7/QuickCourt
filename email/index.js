@@ -12,7 +12,7 @@ try { process.loadEnvFile?.(require('path').join(__dirname, '..', '.env')); } ca
 const cfg = () => ({
   clientId: process.env.GMAIL_CLIENT_ID, clientSecret: process.env.GMAIL_CLIENT_SECRET,
   refreshToken: process.env.GMAIL_REFRESH_TOKEN, sender: process.env.GMAIL_SENDER_EMAIL,
-  appUrl: process.env.APP_URL || 'http://localhost:3000',
+  appUrl: (process.env.APP_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL && 'https://' + process.env.VERCEL_PROJECT_PRODUCTION_URL) || 'http://localhost:3000').replace(/\/$/, ''),
 });
 const isConfigured = () => { const c = cfg(); return !!(c.clientId && c.clientSecret && c.refreshToken && c.sender); };
 // How long before a game the reminder goes out — backend config, not UI.
@@ -69,9 +69,11 @@ async function gmailSend({ to, subject, html, text }) {
 function mail(event, to, ctx = {}) {
   if (!to) return;
   if (!isConfigured()) return console.log(`[email] skipped "${event}" → ${to} (Gmail API not configured)`);
-  Promise.resolve().then(() => gmailSend({ to, ...render(event, ctx) }))
+  const job = Promise.resolve().then(() => gmailSend({ to, ...render(event, ctx) }))
     .then(() => console.log(`[email] sent "${event}" → ${to}`))
     .catch((e) => console.error(`[email] "${event}" → ${to} failed: ${e.message}`));
+  // Serverless freezes the function once the response is sent; waitUntil keeps it alive until the email is out.
+  try { require('@vercel/functions').waitUntil(job); } catch { /* not on Vercel / package absent: the job just runs in the background */ }
 }
 
 module.exports = { mail, render, isConfigured, reminderHours };

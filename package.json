@@ -1,23 +1,21 @@
 {
-  "name": "odoo_hackathon",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "name": "quickcourt",
+  "version": "2.0.0",
+  "description": "QuickCourt — sports venue booking (Vercel + Turso)",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node server.js",
     "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@libsql/client": "^0.15.0",
+    "@vercel/functions": "^2.0.0",
     "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "sqlite3": "^5.1.7"
+    "express": "^5.2.1"
   },
   "engines": {
-    "node": "24.x"
+    "node": ">=20"
   }
 }

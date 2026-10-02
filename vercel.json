@@ -1,22 +1,4 @@
 {
-  "version": 2,
-  "functions": {
-    "server.js": {
-      "includeFiles": "database.sqlite"
-    }
-  },
-  "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/server.js"
-    },
-    {
-      "src": "/assets/(.*)",
-      "dest": "/server.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/server.js"
-    }
-  ]
+  "rewrites": [{ "source": "/api/(.*)", "destination": "/api" }],
+  "crons": [{ "path": "/api/cron/emails", "schedule": "0 3 * * *" }]
 }
