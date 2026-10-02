@@ -1,20 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const { mail, isConfigured, reminderHours } = require('./email'); // Gmail API transport is pending — see email/index.js
-const { execute: tursoExecute } = require('./turso-client');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' })); // 15mb: a facility submission can carry several base64 photos (≤1 MB each, enforced client-side)
-
-let readyPromise;
-app.use(async (req, res, next) => {
-  try { if (readyPromise) await readyPromise; next(); } catch (e) { next(e); }
-});
 
 // ponytail: sha256 instead of bcrypt — no external dep, fine for a demo with no real users.
 // Upgrade to bcrypt/argon2 before this ever holds real passwords.
@@ -66,9 +61,10 @@ const stateOf = (city) => Object.keys(LOCATIONS).find(s => LOCATIONS[s][city]);
 // ---------------------------------------------------------------------------
 // DB — promise wrappers so handlers can be async (Express 5 forwards rejections)
 // ---------------------------------------------------------------------------
-const get = async (sql, p = []) => (await tursoExecute(sql, p)).rows[0];
-const all = async (sql, p = []) => (await tursoExecute(sql, p)).rows;
-const run = async (sql, p = []) => { const r = await tursoExecute(sql, p); return { changes: r.rowsAffected, lastID: r.lastInsertRowid }; };
+const db = new sqlite3.Database(path.join(__dirname, 'database.sqlite'));
+const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => e ? rej(e) : res(r)));
+const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => e ? rej(e) : res(r)));
+const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { e ? rej(e) : res(this); }));
 const fail = (status, msg, extra) => Object.assign(new Error(msg), { status, extra });
 
 async function setupSchema() {
@@ -357,38 +353,16 @@ const markCompleted = () => run(`UPDATE bookings SET status='Completed' WHERE st
 // ponytail: in-memory token map — a server restart logs everyone out (the client
 // sends them back to login on 401). Move to a sessions table or JWT when that matters.
 // ---------------------------------------------------------------------------
-// Signed stateless sessions survive Vercel's serverless instance changes.
-// The user is still loaded from the database on every request, so banning an
-// account takes effect immediately.
-const SESSION_SECRET = process.env.SESSION_SECRET || 'quickcourt-demo-change-this-secret';
-const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const b64url = (v) => Buffer.from(v).toString('base64url');
-const signSession = (payload) => {
-  const body = b64url(JSON.stringify(payload));
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
-  return `${body}.${sig}`;
-};
-const readSession = (token) => {
-  try {
-    const [body, sig] = String(token || '').split('.');
-    if (!body || !sig) return null;
-    const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
-    if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-    const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
-    return p.exp > Date.now() ? p : null;
-  } catch { return null; }
-};
+const sessions = new Map(); // token -> userId
 
 app.use(async (req, res, next) => {
-  try {
-    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const session = readSession(token);
-    if (session?.userId) {
-      const u = await get('SELECT * FROM users WHERE id = ?', [session.userId]);
-      if (u && u.status !== 'Banned') { req.user = u; req.token = token; }
-    }
-    next();
-  } catch (e) { next(e); }
+  const token = (req.headers.authorization || '').replace('Bearer ', '');
+  const userId = sessions.get(token);
+  if (userId) {
+    const u = await get('SELECT * FROM users WHERE id = ?', [userId]);
+    if (u && u.status !== 'Banned') { req.user = u; req.token = token; }
+  }
+  next();
 });
 
 const auth = (...roles) => (req, res, next) => {
@@ -434,7 +408,8 @@ app.post('/api/auth/resend-otp', async (req, res) => {
 });
 
 function startSession(u) {
-  const token = signSession({ userId: u.id, exp: Date.now() + SESSION_TTL_MS });
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, u.id);
   return { token, user: publicUser(u) };
 }
 
@@ -459,7 +434,7 @@ app.post('/api/auth/login', async (req, res) => {
   res.json(startSession(u));
 });
 
-app.post('/api/auth/logout', (req, res) => { res.json({ success: true }); });
+app.post('/api/auth/logout', (req, res) => { sessions.delete(req.token); res.json({ success: true }); });
 
 app.post('/api/auth/forgot-password', async (req, res) => {
   const u = await get('SELECT id FROM users WHERE email = ?', [String(req.body.email || '').toLowerCase()]);
@@ -1073,6 +1048,7 @@ async function setBan(id, status) {
   const u = await get("SELECT * FROM users WHERE id = ? AND role != 'admin'", [id]);
   if (!u) throw fail(404, 'User not found.');
   await run('UPDATE users SET status = ? WHERE id = ?', [status, id]);
+  if (status === 'Banned') for (const [t, uidv] of sessions) if (uidv === id) sessions.delete(t); // kick live sessions
 }
 app.put('/api/admin/users/:id/ban', auth('admin'), async (req, res) => { await setBan(req.params.id, 'Banned'); res.json({ success: true }); });
 app.put('/api/admin/users/:id/unban', auth('admin'), async (req, res) => { await setBan(req.params.id, 'Active'); res.json({ success: true }); });
@@ -1112,18 +1088,8 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Something went wrong. Please try again.', ...(err.extra || {}) });
 });
 
-readyPromise = setupSchema().then(seedIfEmpty).then(() => {
+setupSchema().then(seedIfEmpty).then(() => {
+  app.listen(port, () => console.log(`QuickCourt running at http://localhost:${port}`));
   console.log(isConfigured() ? '[email] Gmail API configured' : '[email] Gmail API not configured — emails are logged and skipped (see .env.example)');
-  if (process.env.NODE_ENV !== 'production') {
-    setInterval(() => isConfigured() && sendScheduledEmails().catch(e => console.error('[email] scheduler:', e.message)), 5 * 60000);
-  }
-});
-
-// Vercel imports the Express app as a serverless function. Local development
-// keeps the original `npm start` behaviour.
-if (require.main === module) {
-  readyPromise.then(() => app.listen(port, () => console.log(`QuickCourt running at http://localhost:${port}`)))
-    .catch(e => { console.error('Startup failed:', e); process.exit(1); });
-}
-
-module.exports = app;
+  setInterval(() => isConfigured() && sendScheduledEmails().catch(e => console.error('[email] scheduler:', e.message)), 5 * 60000);
+}).catch(e => { console.error('Startup failed:', e); process.exit(1); });

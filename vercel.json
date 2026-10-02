@@ -1,8 +1,26 @@
 {
   "version": 2,
   "functions": {
-    "api/[...path].js": {
-      "maxDuration": 30
+    "server.js": {
+      "includeFiles": [
+        "database.sqlite",
+        "email/**",
+        "assets/**"
+      ]
     }
-  }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/server.js"
+    },
+    {
+      "src": "/assets/(.*)",
+      "dest": "/server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/server.js"
+    }
+  ]
 }
