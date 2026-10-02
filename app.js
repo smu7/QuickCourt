@@ -161,6 +161,80 @@ const IMG = {
   Swimming: 'https://images.unsplash.com/photo-1576013551627-0cc20b96c2a7?w=800&auto=format&fit=crop',
 };
 
+// ---------------------------------------------------------------------------
+// REVIEW TEXT — a pool of distinct comments so no venue ever shows the same review twice
+// ---------------------------------------------------------------------------
+const REVIEW_TEXT = {
+  pos: ['Booked in under a minute and the court was exactly as pictured.', 'Great lighting for evening games.', 'Well maintained, will book again.', 'Staff were helpful and the slot started right on time.',
+    'Clean, spacious and easy to find. Our group had a great time.', 'Brought the office team here for a Friday session and everyone loved it.', 'Booking was painless and the confirmation came instantly.',
+    'Honestly better than the photos. Worth every rupee.', 'Good vibe, friendly regulars, and the washrooms were clean.', 'Came for one hour and ended up staying for two.',
+    'Plenty of parking and a calm atmosphere even on a Saturday.', 'Surface was in great shape. Very little wear.', 'One of the better venues in the area, I recommend booking early.',
+    'Smooth check-in, no confusion about the slot.', 'Perfect for a quick after-work game.', 'Lovely place. Kids and adults were all comfortable.'],
+  mid: ['Decent, but the washroom needs work.', 'Good surface and friendly staff. Parking gets tight after 7 PM.', 'Fine for the price, though it gets crowded on weekends.', 'Court was good but the lights on one side flickered.',
+    'Nice place overall, a bit hot by the end of the session.', 'Slot started a few minutes late, otherwise a pleasant game.'],
+  low: ['Floor was a little slippery and the staff took a while to respond.', 'Not bad, but the booking time and what was ready on the ground did not quite match.', 'Needs better upkeep, the nets were torn.'],
+  sport: {
+    Badminton: ['The wooden flooring is easy on the knees and the shuttle lanes are well lit.', 'No glare from the ceiling lights, which makes a huge difference for badminton.', 'Nets were tight and the court lines were crisp.'],
+    Football: ['Turf was soft and even, no loose rubber crumbs everywhere.', 'Floodlights covered the whole pitch and the goals were sturdy.', 'Good size for a 6-a-side and the fencing keeps the ball in play.'],
+    Cricket: ['The nets and the pitch both held up well for a full 2-hour session.', 'Good bounce on the turf and a proper scoreboard to keep things fun.', 'Pavilion seating was a nice touch for the people waiting for their turn.'],
+    Tennis: ['Court surface was consistent and the bounce was true.', 'Early morning slots are lovely here, cool and quiet.', 'Ball machine session was a good value for the price.'],
+    'Table Tennis': ['Tables were level and the bats on rent were in decent shape.', 'Lighting over the tables was even and there was no glare.', 'Quiet hall with proper spacing between tables.'],
+    Padel: ['Glass walls were spotless and the rebounds were consistent.', 'Great for first-timers, the staff explained the rules patiently.', 'Rental paddles were good quality, no need to bring our own.'],
+    Basketball: ['Hoops were firm and the paint was fresh.', 'Rims had a nice bounce and the court had good grip.', 'Plenty of space for a proper full-court game.'],
+    Swimming: ['Water was clean and the temperature was just right.', 'Lanes were well managed and the lifeguards were attentive.', 'Changing rooms were tidy and the lockers worked.'],
+  },
+};
+const rnd = (x) => (Math.imul(x + 7, 2654435761) >>> 0) / 4294967296;
+const pickRating = (x) => [5, 5, 4, 4, 4, 5, 3, 4, 5, 2][Math.floor(rnd(x * 3 + 1) * 10)];
+// Returns a comment for this rating that the venue has not used yet, or null if the pool is exhausted.
+function pickReview(sport, rating, used, seed) {
+  const list = rating >= 4 ? [...REVIEW_TEXT.pos, ...(REVIEW_TEXT.sport[sport] || [])] : rating === 3 ? REVIEW_TEXT.mid : REVIEW_TEXT.low;
+  for (let i = 0; i < list.length; i++) { const t = list[(seed * 5 + i) % list.length]; if (!used.has(t)) { used.add(t); return t; } }
+  return null;
+}
+
+// One-time cleanup for demo data that was seeded before reviews/bookings were de-duplicated (see meta flag).
+// Only touches the @quickcourt.demo accounts — real players' bookings and reviews are never modified.
+async function tidyDemoData() {
+  await run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
+  if (await get("SELECT 1 x FROM meta WHERE key = 'tidy_v1'")) return;
+  const demo = "(SELECT id FROM users WHERE email LIKE '%@quickcourt.demo')";
+  const stmts = [];
+  // 1) repeated bookings: same player, same venue and start time again, a second booking on one day, or more than 3 at a venue
+  const seen = new Set(), day = new Set(), per = new Map();
+  for (const b of await all(`SELECT id, user_id, venue_id, date, start_time FROM bookings WHERE user_id IN ${demo} ORDER BY date, created_at, id`)) {
+    const uv = b.user_id + '|' + b.venue_id, slot = uv + '|' + b.start_time;
+    if (seen.has(slot) || day.has(b.user_id + b.date) || (per.get(uv) || 0) >= 3) {
+      for (const t of ['payments', 'reviews']) stmts.push({ sql: `DELETE FROM ${t} WHERE booking_id = ?`, args: [b.id] });
+      stmts.push({ sql: 'DELETE FROM bookings WHERE id = ?', args: [b.id] });
+    } else { seen.add(slot); day.add(b.user_id + b.date); per.set(uv, (per.get(uv) || 0) + 1); }
+  }
+  const gone = new Set(stmts.filter(s => s.sql.startsWith('DELETE FROM bookings')).map(s => s.args[0]));
+  // 2) reviews: one per player per venue, every comment different within a venue
+  const used = {}, byUV = new Set(), cnt = {};
+  for (const r of await all(`SELECT r.id, r.booking_id, r.user_id, r.venue_id, r.rating, v.sports FROM reviews r JOIN venues v ON v.id = r.venue_id WHERE r.user_id IN ${demo} ORDER BY r.venue_id, r.created_at, r.id`)) {
+    if (gone.has(r.booking_id)) continue;
+    const uv = r.user_id + '|' + r.venue_id, set = used[r.venue_id] ||= new Set();
+    const text = byUV.has(uv) ? null : pickReview(P(r.sports)[0], r.rating, set, r.id.length + (cnt[r.venue_id] || 0));
+    if (!text) { stmts.push({ sql: 'DELETE FROM reviews WHERE id = ?', args: [r.id] }); continue; }
+    byUV.add(uv); cnt[r.venue_id] = (cnt[r.venue_id] || 0) + 1;
+    stmts.push({ sql: 'UPDATE reviews SET comment = ? WHERE id = ?', args: [text, r.id] });
+  }
+  // 3) top up venues that lost reviews, from finished bookings nobody reviewed yet (max 3 per venue)
+  let n = 0;
+  for (const b of await all(`SELECT b.id, b.user_id, b.venue_id, b.date, b.sport FROM bookings b LEFT JOIN reviews r ON r.booking_id = b.id WHERE b.status = 'Completed' AND r.id IS NULL AND b.user_id IN ${demo} ORDER BY b.date DESC`)) {
+    const uv = b.user_id + '|' + b.venue_id;
+    if (gone.has(b.id) || byUV.has(uv) || (cnt[b.venue_id] || 0) >= 3) continue;
+    const rating = pickRating(++n), text = pickReview(b.sport, rating, used[b.venue_id] ||= new Set(), n);
+    if (!text) continue;
+    byUV.add(uv); cnt[b.venue_id] = (cnt[b.venue_id] || 0) + 1;
+    stmts.push({ sql: 'INSERT OR IGNORE INTO reviews (id,user_id,venue_id,booking_id,rating,comment,created_at) VALUES (?,?,?,?,?,?,?)',
+      args: [uid('review'), b.user_id, b.venue_id, b.id, rating, text, new Date(b.date + 'T12:00:00').toISOString()] });
+  }
+  for (let i = 0; i < stmts.length; i += 100) await client.batch(stmts.slice(i, i + 100), 'write');
+  await run("INSERT OR REPLACE INTO meta (key, value) VALUES ('tidy_v1', ?)", [new Date().toISOString()]);
+}
+
 async function seedIfEmpty() {
   const { c } = await get('SELECT COUNT(*) c FROM users');
   const { v } = await get('SELECT COUNT(*) v FROM venues');
@@ -285,6 +359,10 @@ async function seedData(run, get) {
   // Each booking goes to a player who lives in that venue's city.
   const hours = ['07:00', '08:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
   const approved = Object.keys(courtsByVenue).filter(id => !STATUS[id]);
+  const sportOf = {};
+  for (const g of venueGroups) for (const v of g[2]) sportOf[v[0]] = v[3][0];
+  // A player books at most once a day, at most 3 times per venue, and reviews a venue once — no repeats.
+  const userDay = new Set(), userVenue = new Map(), reviewedUV = new Set(), usedText = {};
   let n = 0;
   for (let d = -20; d <= 5; d++) {
     for (let k = 0; k < 8 + ((d + 21) % 3); k++) {
@@ -292,23 +370,26 @@ async function seedData(run, get) {
       const court = courtsByVenue[vid][n % 2];
       const date = addDays(d);
       const start = hours[(n * 3 + k) % hours.length];
-      const dup = await get('SELECT 1 FROM bookings WHERE court_id=? AND date=? AND start_time=?', [court.id, date, start]);
+      const local = localPlayers(venueCity[vid]);
+      const user = local[n % local.length], uv = user + '|' + vid;
       n++;
-      if (dup) continue;
+      if (await get('SELECT 1 FROM bookings WHERE court_id=? AND date=? AND start_time=?', [court.id, date, start])) continue;
+      if (userDay.has(user + date) || (userVenue.get(uv) || 0) >= 3) continue;
+      userDay.add(user + date); userVenue.set(uv, (userVenue.get(uv) || 0) + 1);
       const cancelled = n % 11 === 0;
       const status = cancelled ? 'Cancelled' : d < 0 ? 'Completed' : 'Confirmed';
       const bid = uid('booking');
-      const local = localPlayers(venueCity[vid]);
-      const user = local[n % local.length];
       await run(`INSERT INTO bookings (id,user_id,venue_id,court_id,sport,date,start_time,duration,total_price,status,created_at,reminder_sent,completed_sent)
                  VALUES (?,?,?,?,?,?,?,1,?,?,?,1,1)`, [bid, user, vid, court.id, court.sport, date, start, court.price, status, daysAgo(Math.max(0, -d + 1))]);
       await run('INSERT INTO payments (id,booking_id,amount,status,created_at) VALUES (?,?,?,?,?)',
         [uid('pay'), bid, court.price, cancelled ? 'Refunded' : 'Paid', daysAgo(Math.max(0, -d + 1))]);
-      if (status === 'Completed' && n % 4 === 0) {
-        const r = [5, 4, 5, 3, 4][n % 5];
-        const comments = ['Booked in under a minute and the court was exactly as pictured.', 'Good surface and friendly staff. Parking gets tight after 7 PM.', 'Great lighting for evening games.', 'Decent, but the washroom needs work.', 'Well maintained, will book again.'];
-        await run('INSERT INTO reviews (id,user_id,venue_id,booking_id,rating,comment,created_at) VALUES (?,?,?,?,?,?,?)',
-          [uid('review'), user, vid, bid, r, comments[n % 5], daysAgo(Math.max(0, -d))]);
+      if (status === 'Completed' && !reviewedUV.has(uv) && rnd(n) < 0.45) {
+        const r = pickRating(n), text = pickReview(sportOf[vid], r, usedText[vid] ||= new Set(), n);
+        if (text) {
+          reviewedUV.add(uv);
+          await run('INSERT INTO reviews (id,user_id,venue_id,booking_id,rating,comment,created_at) VALUES (?,?,?,?,?,?,?)',
+            [uid('review'), user, vid, bid, r, text, daysAgo(Math.max(0, -d))]);
+        }
       }
     }
   }
@@ -402,6 +483,7 @@ const ready = () => readyP ||= (async () => {
   if (!client) throw fail(503, 'Database is not configured. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the Vercel project settings.');
   await setupSchema();
   await seedIfEmpty();
+  await tidyDemoData().catch(e => console.error('[tidy] skipped:', e.message));
 })().catch(e => { readyP = null; throw e; });
 
 const SECRET = process.env.SESSION_SECRET || process.env.TURSO_AUTH_TOKEN || 'quickcourt-dev-secret';
