@@ -11,6 +11,18 @@ const BOOKING_ROWS = [['Venue', 'venueName'], ['Sport', 'sport'], ['Court', 'cou
 const OWNER_BOOKING_ROWS = [['Player', 'playerName'], ['Venue', 'venueName'], ['Sport', 'sport'], ['Court', 'courtName'], ['Date', 'date'], ['Time', 'time'], ['Amount', 'amount'], ['Booking ID', 'bookingId']];
 
 const TEMPLATES = {
+  verificationOtp: {
+    subject: () => 'Your QuickCourt verification code',
+    intro: (c) => [hi(c), 'Use the verification code below to verify your QuickCourt account.'],
+    rows: [['Verification code', 'otp']],
+    outro: () => [
+      'This code expires in 10 minutes.',
+      "If you didn't request this code, you can ignore this email.",
+      SIGN
+    ],
+  },
+
+  
   // ---------- player ----------
   welcome: {
     subject: () => 'Welcome to QuickCourt 🏸',
