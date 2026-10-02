@@ -2,11 +2,7 @@
   "version": 2,
   "functions": {
     "server.js": {
-      "includeFiles": [
-        "database.sqlite",
-        "email/**",
-        "assets/**"
-      ]
+      "includeFiles": "**"
     }
   },
   "routes": [
