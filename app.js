@@ -133,6 +133,18 @@ async function setupSchema() {
     id TEXT PRIMARY KEY, user_id TEXT, type TEXT, message TEXT, link TEXT,
     read INTEGER DEFAULT 0, created_at TEXT)`);
   await client.batch(stmts, 'write'); // one round trip instead of eleven
+  // A table that already existed in Turso (older/partial schema) is topped up instead of failing later.
+  const WANT = {
+    users: { name: 'TEXT', avatar: 'TEXT', role: 'TEXT', phone: 'TEXT', sports: 'TEXT', skill_level: 'TEXT', status: "TEXT DEFAULT 'Active'", email_verified: 'INTEGER DEFAULT 0', otp: 'TEXT', otp_expires: 'INTEGER', created_at: 'TEXT' },
+    venues: { owner_id: 'TEXT', description: 'TEXT', address: 'TEXT', area: 'TEXT', city: 'TEXT', state: 'TEXT', pincode: 'TEXT', latitude: 'REAL', longitude: 'REAL', venue_type: 'TEXT', contact_phone: 'TEXT', sports: 'TEXT', amenities: 'TEXT',
+      cover_image: 'TEXT', images: 'TEXT', opening_time: "TEXT DEFAULT '06:00'", closing_time: "TEXT DEFAULT '23:00'", slot_minutes: 'INTEGER DEFAULT 60', active_days: "TEXT DEFAULT '[0,1,2,3,4,5,6]'", status: "TEXT DEFAULT 'Pending'", reject_reason: 'TEXT', created_at: 'TEXT' },
+    courts: { opening_time: 'TEXT', closing_time: 'TEXT' },
+    bookings: { reminder_sent: 'INTEGER DEFAULT 0', completed_sent: 'INTEGER DEFAULT 0' },
+  };
+  for (const [table, cols] of Object.entries(WANT)) {
+    const have = new Set((await all(`PRAGMA table_info(${table})`)).map(c => c.name));
+    for (const [col, def] of Object.entries(cols)) if (!have.has(col)) await run(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,17 +163,18 @@ const IMG = {
 
 async function seedIfEmpty() {
   const { c } = await get('SELECT COUNT(*) c FROM users');
-  if (c > 0) return;
+  const { v } = await get('SELECT COUNT(*) v FROM venues');
+  if (c > 0 && v > 0) return; // real data already there — never touch it
   // ~700 inserts: over the network they must go as ONE atomic batch, never one-by-one.
   const stmts = [], taken = new Set();
   const queue = async (sql, args = []) => {
-    stmts.push({ sql, args });
+    stmts.push({ sql: sql.replace('INSERT INTO', 'INSERT OR IGNORE INTO'), args }); // safe if some demo rows already exist
     if (sql.includes('INSERT INTO bookings')) taken.add([args[3], args[5], args[6]].join('|'));
   };
   const isTaken = async (sql, args) => (taken.has(args.join('|')) ? { 1: 1 } : undefined);
   await seedData(queue, isTaken);
   try { await client.batch(stmts, 'write'); }
-  catch (e) { if (!(await get('SELECT COUNT(*) c FROM users')).c) throw e; } // another cold start seeded first
+  catch (e) { if (!(await get('SELECT COUNT(*) c FROM venues')).c) throw e; } // another cold start seeded first
 }
 
 async function seedData(run, get) {
@@ -423,6 +436,12 @@ app.use('/api', async (req, res, next) => {
     await sendScheduledEmails().catch(e => console.error('[email] scheduler:', e.message));
   }
   next();
+});
+// Quick diagnostics: open /api/health in the browser to see what the deployed database actually contains.
+app.get('/api/health', async (req, res) => {
+  const n = async (t, w = '') => (await get(`SELECT COUNT(*) c FROM ${t} ${w}`)).c;
+  res.json({ ok: true, db: DB_URL ? 'turso' : 'local-file', users: await n('users'), venues: await n('venues'), approvedVenues: await n('venues', "WHERE status = 'Approved'"),
+    courts: await n('courts'), bookings: await n('bookings'), venuesByCity: await all("SELECT city, COUNT(*) AS n FROM venues WHERE status = 'Approved' GROUP BY city") });
 });
 app.get('/api/cron/emails', async (req, res) => {
   if (process.env.CRON_SECRET && req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) throw fail(401, 'Unauthorized.');
