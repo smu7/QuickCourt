@@ -545,8 +545,7 @@ const publicUser = (u) => {
 
 // ---------------------------------------------------------------------------
 // AUTH
-// ponytail: OTP is returned in the response (and shown on the verify screen) because no
-// mail/SMS provider is wired up. Drop `demoOtp` from responses once a real sender exists.
+// Verification and password-reset OTPs are sent through the configured Gmail service.
 // ---------------------------------------------------------------------------
 app.post('/api/auth/signup', async (req, res) => {
   const { name, email, password, confirmPassword, role, avatar } = req.body;
@@ -563,7 +562,8 @@ app.post('/api/auth/signup', async (req, res) => {
   await run(`INSERT INTO users (id,name,email,password_hash,avatar,role,phone,sports,skill_level,status,email_verified,otp,otp_expires,created_at)
              VALUES (?,?,?,?,?,?,'','[]','','Active',0,?,?,?)`,
     [uid('user'), name.trim(), email.toLowerCase(), hash(password), avatar || '', role, otp, Date.now() + 10 * 60000, new Date().toISOString()]);
-  res.json({ email: email.toLowerCase(), demoOtp: otp });
+  mail('verificationOtp', email.toLowerCase(), { name: name.trim(), otp });
+  res.json({ email: email.toLowerCase() });
 });
 
 app.post('/api/auth/resend-otp', async (req, res) => {
@@ -571,7 +571,8 @@ app.post('/api/auth/resend-otp', async (req, res) => {
   if (!u) throw fail(404, 'No account with this email.');
   const otp = genOtp();
   await run('UPDATE users SET otp = ?, otp_expires = ? WHERE id = ?', [otp, Date.now() + 10 * 60000, u.id]);
-  res.json({ demoOtp: otp });
+  mail('verificationOtp', u.email, { name: u.name, otp });
+  res.json({ success: true });
 });
 
 function startSession(u) {
@@ -594,7 +595,8 @@ app.post('/api/auth/login', async (req, res) => {
   if (!u.email_verified) {
     const otp = genOtp();
     await run('UPDATE users SET otp = ?, otp_expires = ? WHERE id = ?', [otp, Date.now() + 10 * 60000, u.id]);
-    throw fail(403, 'Please verify your email first.', { needsVerification: true, email: u.email, demoOtp: otp });
+    mail('verificationOtp', u.email, { name: u.name, otp });
+    throw fail(403, 'Please verify your email first.', { needsVerification: true, email: u.email });
   }
   res.json(startSession(u));
 });
@@ -606,7 +608,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   if (!u) throw fail(404, 'No account with this email.');
   const otp = genOtp();
   await run('UPDATE users SET otp = ?, otp_expires = ? WHERE id = ?', [otp, Date.now() + 10 * 60000, u.id]);
-  res.json({ demoOtp: otp });
+  mail('verificationOtp', u.email, { name: u.name, otp });
+  res.json({ success: true });
 });
 
 app.post('/api/auth/reset-password', async (req, res) => {
